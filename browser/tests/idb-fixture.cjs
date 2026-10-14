@@ -34,12 +34,14 @@ module.exports = function indexedDBFixture() {
               get: key => operation(() => structuredClone(values.get(key))),
               put: (value, key) => operation(() => { values.set(key, structuredClone(value)); return key; }),
               delete: key => operation(() => { values.delete(key); }),
-              openCursor(range) {
+              openKeyCursor(range) { return this.openCursor(range, true); },
+              openCursor(range, keysOnly = false) {
                 const req = {}, keys = [...values.keys()].sort().filter(k => !range || k >= range.lower && k <= range.upper);
                 let index = 0; pending++;
                 const next = () => queueMicrotask(() => {
                   const key = keys[index++];
-                  req.result = key === undefined ? null : { key, value: structuredClone(values.get(key)),
+                  req.result = key === undefined ? null : { key,
+                    ...(keysOnly ? {} : { value: structuredClone(values.get(key)) }),
                     delete: () => operation(() => values.delete(key)), continue: next };
                   req.onsuccess?.();
                   if (key === undefined) { pending--; finish(); }

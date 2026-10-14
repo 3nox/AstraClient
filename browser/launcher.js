@@ -147,7 +147,16 @@
     if (manifest.packageName !== previous) {
       closeStore(); store = await api.openStore(window.indexedDB, location.pathname, manifest.packageName);
     }
-    if (await api.state(store, manifest) === 'installed') {
+    let complete = await api.state(store, manifest) === 'installed';
+    if (complete) {
+      for (let i = 0; i < manifest.chunks.length; i++) {
+        const chunk = await store.getChunk(i);
+        if (!(chunk instanceof ArrayBuffer) || chunk.byteLength !== manifest.chunks[i].size) {
+          complete = false; break;
+        }
+      }
+    }
+    if (complete) {
       current = 'installed';
       message('Game data is already up to date. No download needed.');
     } else await download();

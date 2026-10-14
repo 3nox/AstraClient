@@ -102,12 +102,30 @@
             // Remove the metadata first: interrupted writes are never "installed".
             const names = new Set([canonical, deployment + packageName, name,
               ...(await metadataEntries()).map(([key]) => key)]);
+            // Interrupted installs/removals can leave chunks with no metadata.
+            // Scan keys only, without cloning the large package payloads.
+            await new Promise((ok, fail) => {
+              const tx = db.transaction('PACKAGES', 'readonly');
+              const prefix = `package/${deployment}`;
+              const req = tx.objectStore('PACKAGES').openKeyCursor(IDBKeyRange.bound(prefix, prefix + '\uffff'));
+              req.onsuccess = () => {
+                const cursor = req.result;
+                if (!cursor) return;
+                const previous = cursor.key.slice('package/'.length, cursor.key.lastIndexOf('/'));
+                const suffix = previous.slice(deployment.length);
+                if (suffix === 'astraclient.data' || suffix.endsWith('/astraclient.data')) names.add(previous);
+                cursor.continue();
+              };
+              tx.oncomplete = ok;
+              tx.onabort = () => fail(tx.error || new Error('Unable to locate game data chunks.'));
+              tx.onerror = () => {};
+            });
             for (const previous of names) {
               await transaction('METADATA', 'readwrite', s => s.delete('metadata/' + previous));
               const prefix = `package/${previous}/`;
               await new Promise((ok, fail) => {
                 const tx = db.transaction('PACKAGES', 'readwrite');
-                const req = tx.objectStore('PACKAGES').openCursor(IDBKeyRange.bound(prefix, prefix + '\uffff'));
+                const req = tx.objectStore('PACKAGES').openKeyCursor(IDBKeyRange.bound(prefix, prefix + '\uffff'));
                 req.onsuccess = () => { const cursor = req.result; if (cursor) { cursor.delete(); cursor.continue(); } };
                 tx.oncomplete = ok;
                 tx.onabort = () => fail(tx.error || new Error('Unable to remove game data.'));

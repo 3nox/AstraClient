@@ -206,6 +206,30 @@ test('legacy namespace adoption still rejects corrupt chunks rather than reusing
   finally { delete globalThis.IDBKeyRange; store.close(); }
 });
 
+test('remove reclaims unknown orphan package chunks without touching other deployments or files', async () => {
+  const idb = require('./idb-fixture.cjs')();
+  const { manifest, bytes } = await fixture();
+  const store = await api.openStore(idb, '/client/astraclient.html', manifest.packageName);
+  const prefix = encodeURIComponent('/client/');
+  const meta = idb.databases.get('EM_PRELOAD_CACHE').get('METADATA');
+  const chunks = idb.databases.get('EM_PRELOAD_CACHE').get('PACKAGES');
+  const known = prefix + '/known/build/astraclient.data';
+  const orphan = prefix + '/abandoned/build/astraclient.data';
+  const kept = ['package/' + encodeURIComponent('/other/') + '/old/astraclient.data/0',
+    'package/' + prefix + '/old/unrelated.data/0'];
+  meta.set('metadata/' + known, { uuid: 'old', chunkCount: 1 });
+  for (const key of [`package/${known}/0`, `package/${orphan}/0`, `package/${orphan}/7`, ...kept])
+    chunks.set(key, bytes.buffer.slice(0));
+  globalThis.IDBKeyRange = { bound: (lower, upper) => ({ lower, upper }) };
+  try {
+    await store.remove();
+    assert.deepEqual([...chunks.keys()].sort(), kept.sort());
+    assert.equal(meta.has('metadata/' + known), false);
+    await store.remove(); // Interrupted removals and repeated Uninstall are safe.
+    assert.deepEqual([...chunks.keys()].sort(), kept);
+  } finally { delete globalThis.IDBKeyRange; store.close(); }
+});
+
 test('a changed manifest or trust schema cannot inherit verification from an old install', async () => {
   for (const change of ['manifest', 'schema', 'size']) {
     const { manifest, store, fetchData } = await fixture();

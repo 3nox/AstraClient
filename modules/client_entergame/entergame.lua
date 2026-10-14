@@ -21,6 +21,8 @@ local rememberPasswordBox
 local rememberEmailBox
 local autoLoginBox
 local restoringWebPassword = false
+local restoredWebPassword
+local webLoginScope
 local protos = { "860", "1524" }
 
 -- Google Configuration
@@ -82,7 +84,7 @@ local function webPasswordScope()
   return server and server.loginLink or (serverHostTextEdit and serverHostTextEdit:getText() or '')
 end
 
-local function restoreWebPassword()
+local function restoreWebPassword(initializing)
   if not ClientSecurity.isBrowser() or not rememberPasswordBox or not enterGame then return end
   restoringWebPassword = true
   local supported = g_platform.canRememberWebPassword and g_platform.canRememberWebPassword()
@@ -93,7 +95,13 @@ local function restoreWebPassword()
       saved = value
     end
   end
-  enterGame:getChildById('accountPasswordTextEdit'):setText(saved and saved.password or '')
+  local passwordWidget = enterGame:getChildById('accountPasswordTextEdit')
+  if saved then
+    passwordWidget:setText(saved.password)
+  elseif initializing or passwordWidget:getText() == restoredWebPassword then
+    passwordWidget:setText('')
+  end
+  restoredWebPassword = saved and saved.password or nil
   if saved then enterGame:getChildById('accountNameTextEdit'):setText(saved.account) end
   rememberPasswordBox:setChecked(saved ~= nil)
   rememberPasswordBox:setEnabled(supported == true)
@@ -202,7 +210,7 @@ local function finishCharacterList(characters, account, otui)
   if ClientSecurity.isBrowser() and rememberPasswordBox:isChecked() and (G.gtoken == '' or G.gtoken == nil)
       and g_platform.saveWebCredentials then
     -- Persist only a successfully authenticated password, never OAuth/2FA tokens.
-    if not g_platform.saveWebCredentials(G.host or webPasswordScope(), G.account, G.password) then
+    if not g_platform.saveWebCredentials(webLoginScope or webPasswordScope(), G.account, G.password) then
       displayErrorBox(tr('Remember Password'), tr('Unable to remember this login securely. Your login can continue without saving it.'))
     end
   end
@@ -482,6 +490,7 @@ end
 -- public functions
 function EnterGame.init()
   if USE_NEW_ENERGAME then return end
+  restoredWebPassword, webLoginScope = nil, nil
   enterGame = g_ui.displayUI('entergame')
   if LOGPASS ~= nil then
     logpass = g_ui.loadUI('logpass', enterGame:getParent())
@@ -545,7 +554,7 @@ function EnterGame.init()
   autoLoginBox = enterGame:getChildById('autoLoginBox')
   autoLoginBox:setChecked(g_settings.getBoolean('autologin'))
   if ClientSecurity.isBrowser() then
-    restoreWebPassword()
+    restoreWebPassword(true)
     autoLoginBox:setChecked(false)
     autoLoginBox:setEnabled(false)
   end
@@ -609,6 +618,7 @@ function EnterGame.onGameEnd(...)
 end
 
 function EnterGame.terminate()
+  restoredWebPassword, webLoginScope = nil, nil
   if ClientSecurity.isBrowser() and not g_game.isOnline() and not g_game.isLogging() then
     G.password, G.gtoken, G.authenticatorToken, G.sessionKey = '', '', '', ''
   end
@@ -808,6 +818,7 @@ local function performLogin(account, password, token, host, gtoken)
   G.server = serverSelector:getText():trim()
   local chosenServer = getServerInfoByName(G.server)
   G.host = chosenServer and chosenServer.loginLink or serverHostTextEdit:getText()
+  webLoginScope = G.host
   G.clientVersion = chosenServer and chosenServer.version or tonumber(clientVersionSelector:getText())
 
   if G.password == "" then
