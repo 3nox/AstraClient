@@ -135,6 +135,31 @@ for _, browser in ipairs({true, false}) do
     assert(widgets.accountPasswordTextEdit.text == '')
   else assert(widgets.accountPasswordTextEdit.text == 'fictitious-password') end
 end
+-- The opt-in vault is independent from OTML; only successful password logins
+-- may save, OAuth tokens stay session-only, and unchecking forgets immediately.
+g_platform.isBrowser = function() return true end
+local remembered, forgotten = {}, 0
+g_platform.canRememberWebPassword = function() return true end
+g_platform.getWebCredentials = function() return 'vault-json' end
+g_platform.saveWebCredentials = function(scope, account, password)
+  remembered[#remembered+1] = {scope, account, password}; return true
+end
+g_platform.forgetWebCredentials = function() forgotten = forgotten + 1 end
+json = {decode = function(value)
+  assert(value == 'vault-json'); return {account = 'identifier', password = 'fictitious-password'}
+end}
+widgets = {}; EnterGame.init()
+assert(widgets.rememberPasswordBox.enabled and widgets.rememberPasswordBox.checked)
+assert(widgets.accountPasswordTextEdit.text == 'fictitious-password')
+assert(not widgets.autoLoginBox.enabled and not widgets.autoLoginBox.checked)
+G.host, G.account, G.password, G.gtoken = 'https://login.example/login', 'identifier', 'fictitious-password', ''
+finish({}, {})
+assert(#remembered == 1 and remembered[1][1] == G.host and settings.password == nil)
+G.gtoken = 'session-only'; finish({}, {})
+assert(#remembered == 1, 'OAuth tokens must not enter the password vault')
+widgets.rememberPasswordBox.checked = false
+EnterGame.onRememberPasswordChange()
+assert(forgotten == 1)
 -- Offline/reload clears session credentials; active world/reconnect and native are preserved.
 for _, scenario in ipairs({{true, false, false}, {true, true, false}, {true, false, true}, {false, false, false}}) do
   local browser = scenario[1]; online, logging = scenario[2], scenario[3]

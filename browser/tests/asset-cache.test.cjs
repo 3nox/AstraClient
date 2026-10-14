@@ -162,6 +162,50 @@ test('IndexedDB ownership closes once across explicit close and version changes'
   assert.equal(closes, 1);
 });
 
+test('cache survives build-directory changes, adopts old SDK entries, and isolates deployments', async () => {
+  const idb = require('./idb-fixture.cjs')();
+  const { manifest, bytes } = await fixture();
+  const prefix = encodeURIComponent('/client/');
+  globalThis.IDBKeyRange = { bound: (lower, upper) => ({ lower, upper }) };
+  try {
+    let store = await api.openStore(idb, '/client/astraclient.html', manifest.packageName);
+    await api.install(store, manifest, async () => new Response(bytes)); store.close();
+    const meta = idb.databases.get('EM_PRELOAD_CACHE').get('METADATA');
+    const chunks = idb.databases.get('EM_PRELOAD_CACHE').get('PACKAGES');
+    const canonical = prefix + 'astraclient.data';
+    assert.ok(meta.has('metadata/' + canonical));
+    // Simulate a previous SDK install whose key embeds its compilation path.
+    const legacy = prefix + '/old/build/dist/astraclient.data';
+    meta.set('metadata/' + legacy, meta.get('metadata/' + canonical)); meta.delete('metadata/' + canonical);
+    chunks.set('package/' + legacy + '/0', chunks.get('package/' + canonical + '/0')); chunks.delete('package/' + canonical + '/0');
+    const nextManifest = { ...manifest, packageName: '/different/build/dist/astraclient.data' };
+    store = await api.openStore(idb, '/client/astraclient.html', nextManifest.packageName);
+    assert.equal(await api.state(store, nextManifest), 'installed');
+    assert.deepEqual(new Uint8Array(await api.readPackage(store, nextManifest)), bytes);
+    const other = await api.openStore(idb, '/other/astraclient.html', nextManifest.packageName);
+    await api.install(other, nextManifest, async () => new Response(bytes));
+    await store.remove();
+    assert.equal(await api.state(store, nextManifest), 'missing', 'uninstall cannot resurrect an old SDK alias');
+    assert.equal(await api.state(other, nextManifest), 'installed');
+    assert.deepEqual(new Uint8Array(await api.readPackage(other, nextManifest)), bytes);
+    store.close(); other.close();
+    assert.ok(idb.handles.every(db => db.closed));
+  } finally { delete globalThis.IDBKeyRange; }
+});
+
+test('legacy namespace adoption still rejects corrupt chunks rather than reusing them', async () => {
+  const idb = require('./idb-fixture.cjs')();
+  const { manifest } = await fixture();
+  const store = await api.openStore(idb, '/client/astraclient.html', manifest.packageName);
+  const name = encodeURIComponent('/client/') + '/old/dist/astraclient.data';
+  idb.databases.get('EM_PRELOAD_CACHE').get('METADATA').set('metadata/' + name,
+    { uuid: manifest.uuid, chunkCount: 1 });
+  idb.databases.get('EM_PRELOAD_CACHE').get('PACKAGES').set('package/' + name + '/0', new ArrayBuffer(manifest.size));
+  globalThis.IDBKeyRange = { bound: (lower, upper) => ({ lower, upper }) };
+  try { assert.equal(await api.readPackage(store, manifest), null); }
+  finally { delete globalThis.IDBKeyRange; store.close(); }
+});
+
 test('a changed manifest or trust schema cannot inherit verification from an old install', async () => {
   for (const change of ['manifest', 'schema', 'size']) {
     const { manifest, store, fetchData } = await fixture();

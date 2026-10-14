@@ -20,6 +20,7 @@ local serverHostTextEdit
 local rememberPasswordBox
 local rememberEmailBox
 local autoLoginBox
+local restoringWebPassword = false
 local protos = { "860", "1524" }
 
 -- Google Configuration
@@ -73,6 +74,33 @@ local function getDefaultClientVersion()
     return tostring(clientVersion)
   end
   return protos[1]
+end
+
+local function webPasswordScope()
+  if not serverSelector then return '' end
+  local server = getServerInfoByName(serverSelector:getText())
+  return server and server.loginLink or (serverHostTextEdit and serverHostTextEdit:getText() or '')
+end
+
+local function restoreWebPassword()
+  if not ClientSecurity.isBrowser() or not rememberPasswordBox or not enterGame then return end
+  restoringWebPassword = true
+  local supported = g_platform.canRememberWebPassword and g_platform.canRememberWebPassword()
+  local saved
+  if supported and g_platform.getWebCredentials then
+    local ok, value = pcall(function() return json.decode(g_platform.getWebCredentials(webPasswordScope())) end)
+    if ok and type(value) == 'table' and type(value.account) == 'string' and type(value.password) == 'string' then
+      saved = value
+    end
+  end
+  enterGame:getChildById('accountPasswordTextEdit'):setText(saved and saved.password or '')
+  if saved then enterGame:getChildById('accountNameTextEdit'):setText(saved.account) end
+  rememberPasswordBox:setChecked(saved ~= nil)
+  rememberPasswordBox:setEnabled(supported == true)
+  rememberPasswordBox:setTooltip(tr(supported and
+    'Optional encrypted storage on this browser. Do not enable on shared devices. Uncheck to forget.' or
+    'Encrypted password storage is unavailable in this browser.'))
+  restoringWebPassword = false
 end
 
 local function ensureThingsLoaded()
@@ -170,6 +198,13 @@ local function finishCharacterList(characters, account, otui)
     g_settings.set('password', password)
   elseif ClientSecurity.isBrowser() or not rememberPasswordBox:isChecked() then
     g_settings.remove('password')
+  end
+  if ClientSecurity.isBrowser() and rememberPasswordBox:isChecked() and (G.gtoken == '' or G.gtoken == nil)
+      and g_platform.saveWebCredentials then
+    -- Persist only a successfully authenticated password, never OAuth/2FA tokens.
+    if not g_platform.saveWebCredentials(G.host or webPasswordScope(), G.account, G.password) then
+      displayErrorBox(tr('Remember Password'), tr('Unable to remember this login securely. Your login can continue without saving it.'))
+    end
   end
 
   for _, characterInfo in pairs(characters) do
@@ -504,13 +539,13 @@ function EnterGame.init()
   accountWidget:setCursorPos(#account)
   rememberEmailBox:setChecked(#account > 0)
 
+  restoringWebPassword = true
   rememberPasswordBox:setChecked(#password > 0)
+  restoringWebPassword = false
   autoLoginBox = enterGame:getChildById('autoLoginBox')
   autoLoginBox:setChecked(g_settings.getBoolean('autologin'))
   if ClientSecurity.isBrowser() then
-    rememberPasswordBox:setChecked(false)
-    rememberPasswordBox:setEnabled(false)
-    rememberPasswordBox:setTooltip(tr('Passwords are never saved in the browser.'))
+    restoreWebPassword()
     autoLoginBox:setChecked(false)
     autoLoginBox:setEnabled(false)
   end
@@ -744,6 +779,16 @@ function EnterGame.onServerChange()
     serverHostTextEdit:setText(serverInfo.name)
     clientVersionSelector:setOption(serverInfo.version and tostring(serverInfo.version) or getDefaultClientVersion())
     modules.client_background.updateStatus(serverInfo)
+  end
+  restoreWebPassword()
+end
+
+function EnterGame.onRememberPasswordChange()
+  if restoringWebPassword or not ClientSecurity.isBrowser() or not rememberPasswordBox then return end
+  if rememberPasswordBox:isChecked() and g_platform.allowWebPasswordStorage then
+    g_platform.allowWebPasswordStorage()
+  elseif not rememberPasswordBox:isChecked() and g_platform.forgetWebCredentials then
+    g_platform.forgetWebCredentials()
   end
 end
 

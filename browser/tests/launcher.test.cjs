@@ -100,6 +100,16 @@ test('saved Off overrides a deployment default and denied storage is harmless', 
   assert.doesNotThrow(() => toggle.dispatchEvent(new Event('change')));
 });
 
+test('Update reuses an unchanged installation instead of downloading the same package', async () => {
+  const run = launcher();
+  run.context.AstraAssetCache.install = async () => { throw new Error('unexpected download'); };
+  await tick();
+  await run.element('launcher-update').listeners.click();
+  assert.equal(run.element('launcher-state').textContent, 'Ready to Play');
+  assert.match(run.element('launcher-message').textContent, /already up to date/);
+  assert.equal(run.reloads(), 0);
+});
+
 test('Play hands verified data to the SDK exactly once and waits for a real client frame', async () => {
   const { element, context } = launcher();
   await tick();
