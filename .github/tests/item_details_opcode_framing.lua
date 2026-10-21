@@ -127,4 +127,15 @@ local empty = Message:new(u16(1) .. u32(0) .. u32(0) .. u32(0) .. string.char(0)
 callbacks[0xC7](nil, empty)
 assert(empty:getUnreadSize() == #move and empty:getU8() == 0x6D)
 
+local f = assert(io.open(cppPath, "rb"))
+local native = assert(f:read("*a"))
+f:close()
+local startAt = assert(native:find("void ProtocolGame::parseCustomItemDetails", 1, true))
+local endAt = assert(native:find("void ProtocolGame::parseKillTracker", startAt, true))
+local detailParser = native:sub(startAt, endAt - 1)
+assert(not detailParser:find("skipBytes(msg->getUnreadSize())", 1, true),
+       "native 0xC7 still drains the shared frame")
+assert(not detailParser:find("peekU16()", 1, true),
+       "native 0xC7 still guesses an unframed optional string")
+
 print("item values/details coalesced-frame regression: OK")

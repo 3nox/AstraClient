@@ -15,9 +15,9 @@ suite covers large ItemValues batches and chained metadata followed by movement.
 The native regression uses the exact reader called by ProtocolGame and rejects
 every truncated prefix of a representative payload, including NPC strings.
 
-The experimental PR #221 is updated in place. Its incomplete test fixture and
-the LuaJIT reserved-word syntax error in the waypoint command table are corrected
-here. No merge to main is performed.
+The parser fixes from PR #221 are now included from main. This branch retains
+its additional native framing assertions; the LuaJIT reserved-word correction
+and the rarity/relog lifecycle fixes from main are preserved.
 
 ## Cross-repository finding
 
