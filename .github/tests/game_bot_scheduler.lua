@@ -4,6 +4,7 @@ local expectLiveDrain = arg[3] == "--expect-live-drain"
 
 -- Load the real executor and scheduling API with only client/UI/clock stubs.
 local now, context, messages
+---Provide the corelib extension for the fixture's only mocked config filename.
 function string:split(separator)
   assert(self == "fixture.lua" and separator == ".")
   return { "fixture", "lua" }
@@ -16,6 +17,7 @@ g_resources = {
   listDirectoryFiles = function() return { "fixture.lua" } end,
   readFileContents = function() return "" end
 }
+---Load the actual scheduling API while omitting unrelated panels and functions.
 function dofiles(directory)
   if directory == "functions" then
     context = G.botContext
@@ -25,6 +27,7 @@ function dofiles(directory)
   end
 end
 
+---Create a fresh real executor with an isolated context and a controlled clock.
 local function newBot()
   now, messages = 1000, {}
   assert(loadfile(executorScript))()
@@ -37,18 +40,50 @@ local function newBot()
   return context, bot
 end
 
+---Assert exact identity or value equality with a readable failure label.
 local function equal(actual, expected, message)
   assert(actual == expected, string.format("%s: expected %s, got %s",
     message or "value", tostring(expected), tostring(actual)))
 end
 
 local passed = 0
+---Run a scenario synchronously and count it only after every assertion passes.
 local function test(name, callback)
   callback()
   passed = passed + 1
   print("PASS " .. name)
 end
 
+---Count interpreted Lua instructions regardless of the queue's iterator style.
+---Suspend counting only inside the measured queue's real table.remove: some
+---LuaJIT builds implement its inherited array shift in bytecode. Other queues
+---remain counted. Restore hooks, removal and JIT state
+---before propagating a failure; no instruction limit interrupts the callback.
+local function countLuaInstructions(queue, callback)
+  local previousHook, previousMask, previousCount = debug.gethook()
+  local jitEnabled = jit and jit.status()
+  if jit then jit.off(); jit.flush() end
+  local instructions = 0
+  local hook = function() instructions = instructions + 100 end
+  local originalRemove = table.remove
+  table.remove = function(list, ...)
+    if list ~= queue then return originalRemove(list, ...) end
+    debug.sethook()
+    local ok, removed = pcall(originalRemove, list, ...)
+    debug.sethook(hook, "", 100)
+    assert(ok, removed)
+    return removed
+  end
+  debug.sethook(hook, "", 100)
+  local ok, result = pcall(callback)
+  table.remove = originalRemove
+  debug.sethook(previousHook, previousMask, previousCount)
+  if jitEnabled then jit.on() end
+  assert(ok, result)
+  return instructions
+end
+
+---Contrast a finite same-pass baseline chain with progress across generations.
 local function finiteChain()
   local c, bot = newBot()
   local calls = 0
@@ -208,6 +243,101 @@ test("future-only queue remains untouched", function()
   local queue, task = c._scheduler, c._scheduler[1]
   for _ = 1, 100 do bot.script() end
   equal(c._scheduler, queue); equal(c._scheduler[1], task); equal(#queue, 1)
+end)
+
+test("due work does not scan a growing future backlog in Lua", function()
+  ---Build the queue before measuring its one due callback and future boundary.
+  local function measureDuePass(futureCount)
+    local c, bot = newBot()
+    local calls = 0
+    local future = function() error("future callback must not run") end
+    for index = 1, futureCount do c.schedule(100000 + index, future) end
+    local firstFuture, lastFuture = c._scheduler[1], c._scheduler[futureCount]
+    c.schedule(0, function() calls = calls + 1 end)
+    local instructions = countLuaInstructions(c._scheduler, bot.script)
+    equal(calls, 1); equal(#c._scheduler, futureCount)
+    equal(c._scheduler[1], firstFuture); equal(c._scheduler[futureCount], lastFuture)
+    return instructions
+  end
+  local small = measureDuePass(100)
+  local large = measureDuePass(10000)
+  -- A generous relative budget accommodates hook granularity and runtime
+  -- differences while rejecting linear Lua scans via ipairs, pairs or indexing.
+  assert(large <= small + 1000, string.format(
+    "future backlog Lua instructions grew with queue size: small=%d, large=%d", small, large))
+end)
+
+test("instruction measurement restores instrumentation after failure", function()
+  local originalHook, originalMask, originalCount = debug.gethook()
+  local originalRemove = table.remove
+  local originalJit = jit and jit.status()
+  local previousHook = function() end
+  debug.sethook(previousHook, "", 1000000)
+  if jit then jit.off() end
+  local queue = { "removed" }
+  local ok, result = pcall(countLuaInstructions, queue, function()
+    equal(table.remove(queue, 1), "removed")
+    error("expected instruction measurement failure")
+  end)
+  local restoredHook, restoredMask, restoredCount = debug.gethook()
+  local restoredRemove = table.remove
+  local restoredJit = jit and jit.status()
+  -- Restore the fixture's own state even if an assertion detects bad cleanup.
+  debug.sethook(originalHook, originalMask, originalCount)
+  table.remove = originalRemove
+  if originalJit then jit.on() end
+  equal(ok, false); assert(result:find("expected instruction measurement failure", 1, true))
+  equal(#queue, 0); equal(restoredRemove, originalRemove)
+  equal(restoredHook, previousHook); equal(restoredMask, ""); equal(restoredCount, 1000000)
+  if jit then equal(restoredJit, false, "previous disabled JIT state") end
+end)
+
+test("tasks without a generation remain eligible", function()
+  local c, bot = newBot()
+  local calls = 0
+  c.schedule(0, function()
+    calls = calls + 1
+    c.schedule(0, function() calls = calls + 1 end)
+  end)
+  c._scheduler[1].generation = nil
+  bot.script(); equal(calls, 1)
+  bot.script(); equal(calls, 2)
+end)
+
+test("reporter failure retains new and old generations", function()
+  local c, bot = newBot()
+  local seen = {}
+  c.schedule(0, function()
+    c.schedule(-10, function() seen[#seen + 1] = "new" end)
+    error("expected callback failure")
+  end)
+  c.schedule(1, function() seen[#seen + 1] = "old" end)
+  c.error = function() error("expected reporter failure") end
+  now = 1001
+  equal(pcall(bot.script), false)
+  equal(#c._scheduler, 2)
+  bot.script()
+  equal(table.concat(seen, ","), "new,old"); equal(#c._scheduler, 0)
+end)
+
+test("finite reentrant passes do not repeat removed tasks", function()
+  local c, bot = newBot()
+  local seen = {}
+  c.schedule(0, function()
+    seen[#seen + 1] = "outer"
+    c.schedule(0, function()
+      seen[#seen + 1] = "inner"
+      c.schedule(0, function() seen[#seen + 1] = "next" end)
+    end)
+    bot.script()
+    seen[#seen + 1] = "outer-end"
+  end)
+  c.schedule(0, function() seen[#seen + 1] = "old" end)
+  bot.script()
+  equal(table.concat(seen, ","), "outer,old,inner,outer-end")
+  equal(#c._scheduler, 1)
+  bot.script()
+  equal(table.concat(seen, ","), "outer,old,inner,outer-end,next")
 end)
 
 test("callback-first scheduleEvent shares the generation boundary", function()
